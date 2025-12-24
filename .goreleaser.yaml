@@ -45,7 +45,7 @@ changelog:
 
 release:
   github:
-    owner: ZoriHQ
+    owner: jonfriesen
     name: trie-url-classifier
   draft: false
   prerelease: auto

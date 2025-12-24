@@ -1,6 +1,8 @@
 package classifier
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -174,7 +176,10 @@ func TestClassifier_SingleURLs(t *testing.T) {
 			classifier := NewClassifier()
 			classifier.Learn(tt.trainingURLs)
 
-			result := classifier.Classify(tt.testURL)
+			result, err := classifier.Classify(tt.testURL)
+			if err != nil {
+				t.Fatalf("Classify() unexpected error: %v", err)
+			}
 			if result != tt.expected {
 				t.Errorf("Classify() = %v, want %v", result, tt.expected)
 			}
@@ -267,7 +272,10 @@ func TestClassifier_BatchLearning(t *testing.T) {
 			classifier := NewClassifier()
 			classifier.Learn(tt.trainingURLs)
 
-			result := classifier.Classify(tt.testURL)
+			result, err := classifier.Classify(tt.testURL)
+			if err != nil {
+				t.Fatalf("Classify() unexpected error: %v", err)
+			}
 			if result != tt.expected {
 				t.Errorf("Classify() = %v, want %v", result, tt.expected)
 			}
@@ -287,7 +295,10 @@ func TestClassifier_Configuration(t *testing.T) {
 		}
 		classifier.Learn(trainingURLs)
 
-		result := classifier.Classify("/users/789/profile")
+		result, err := classifier.Classify("/users/789/profile")
+		if err != nil {
+			t.Fatalf("Classify() unexpected error: %v", err)
+		}
 		// With high threshold, might not parametrize
 		t.Logf("Result with high threshold: %s", result)
 	})
@@ -302,7 +313,10 @@ func TestClassifier_Configuration(t *testing.T) {
 		}
 		classifier.Learn(trainingURLs)
 
-		result := classifier.Classify("/users/789/profile")
+		result, err := classifier.Classify("/users/789/profile")
+		if err != nil {
+			t.Fatalf("Classify() unexpected error: %v", err)
+		}
 		expected := "/users/{id}/profile"
 		if result != expected {
 			t.Errorf("Classify() = %v, want %v", result, expected)
@@ -329,7 +343,7 @@ func TestClassifier_EdgeCases(t *testing.T) {
 				"/users/123/profile",
 			},
 			testURL:  "/users/123/profile",
-			expected: "/users/123/profile", // Not enough samples for parametrization
+			expected: "/users/{id}/profile", // Classify also learns, so 2 samples triggers detection
 		},
 		{
 			name: "completely new path",
@@ -347,10 +361,186 @@ func TestClassifier_EdgeCases(t *testing.T) {
 			classifier := NewClassifier()
 			classifier.Learn(tt.trainingURLs)
 
-			result := classifier.Classify(tt.testURL)
+			result, err := classifier.Classify(tt.testURL)
+			if err != nil {
+				t.Fatalf("Classify() unexpected error: %v", err)
+			}
 			if result != tt.expected {
 				t.Errorf("Classify() = %v, want %v", result, tt.expected)
 			}
 		})
 	}
 }
+
+func TestClassifier_LiveLearning(t *testing.T) {
+	t.Run("returns error during learning phase", func(t *testing.T) {
+		classifier := NewClassifier(WithMinLearningCount(3))
+
+		// First URL - should learn and return error
+		_, err := classifier.Classify("/users/123/profile")
+		if err == nil {
+			t.Fatal("expected InsufficientDataError, got nil")
+		}
+		insuffErr, ok := err.(*InsufficientDataError)
+		if !ok {
+			t.Fatalf("expected *InsufficientDataError, got %T", err)
+		}
+		if insuffErr.Count != 1 {
+			t.Errorf("Count = %d, want 1", insuffErr.Count)
+		}
+
+		// Second URL
+		_, err = classifier.Classify("/users/456/profile")
+		if err == nil {
+			t.Fatal("expected InsufficientDataError, got nil")
+		}
+		insuffErr = err.(*InsufficientDataError)
+		if insuffErr.Count != 2 {
+			t.Errorf("Count = %d, want 2", insuffErr.Count)
+		}
+
+		// Third URL - still learning (threshold not yet exceeded)
+		_, err = classifier.Classify("/users/789/profile")
+		if err == nil {
+			t.Fatal("expected InsufficientDataError, got nil")
+		}
+		insuffErr = err.(*InsufficientDataError)
+		if insuffErr.Count != 3 {
+			t.Errorf("Count = %d, want 3", insuffErr.Count)
+		}
+
+		// Fourth URL - threshold reached, should classify
+		result, err := classifier.Classify("/users/999/profile")
+		if err != nil {
+			t.Fatalf("unexpected error after threshold: %v", err)
+		}
+		expected := "/users/{id}/profile"
+		if result != expected {
+			t.Errorf("Classify() = %v, want %v", result, expected)
+		}
+	})
+
+	t.Run("Learn also increments count", func(t *testing.T) {
+		classifier := NewClassifier(WithMinLearningCount(5))
+
+		// Learn 3 URLs via Learn()
+		classifier.Learn([]string{
+			"/users/123/profile",
+			"/users/456/profile",
+			"/users/789/profile",
+		})
+
+		// Classify should still be in learning phase (need 2 more)
+		_, err := classifier.Classify("/users/111/profile")
+		insuffErr, ok := err.(*InsufficientDataError)
+		if !ok {
+			t.Fatalf("expected *InsufficientDataError, got %T", err)
+		}
+		if insuffErr.Count != 4 {
+			t.Errorf("Count = %d, want 4", insuffErr.Count)
+		}
+
+		// One more - should hit threshold
+		_, err = classifier.Classify("/users/222/profile")
+		insuffErr = err.(*InsufficientDataError)
+		if insuffErr.Count != 5 {
+			t.Errorf("Count = %d, want 5", insuffErr.Count)
+		}
+
+		// Now should classify normally
+		result, err := classifier.Classify("/users/333/profile")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != "/users/{id}/profile" {
+			t.Errorf("Classify() = %v, want /users/{id}/profile", result)
+		}
+	})
+
+	t.Run("disabled when MinLearningCount is 0", func(t *testing.T) {
+		classifier := NewClassifier() // Default: MinLearningCount = 0
+
+		classifier.Learn([]string{
+			"/users/123/profile",
+			"/users/456/profile",
+			"/users/789/profile",
+		})
+
+		result, err := classifier.Classify("/users/999/profile")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != "/users/{id}/profile" {
+			t.Errorf("Classify() = %v, want /users/{id}/profile", result)
+		}
+	})
+
+	t.Run("empty URL returns no error", func(t *testing.T) {
+		classifier := NewClassifier(WithMinLearningCount(10))
+
+		result, err := classifier.Classify("")
+		if err != nil {
+			t.Fatalf("unexpected error for empty URL: %v", err)
+		}
+		if result != "" {
+			t.Errorf("Classify() = %v, want empty string", result)
+		}
+	})
+}
+
+func TestClassifier_ThreadSafety(t *testing.T) {
+	t.Run("concurrent Classify calls", func(t *testing.T) {
+		classifier := NewClassifier(WithMinLearningCount(100))
+
+		var wg sync.WaitGroup
+		for i := 0; i < 100; i++ {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				url := fmt.Sprintf("/users/%d/profile", id)
+				classifier.Classify(url)
+			}(i)
+		}
+		wg.Wait()
+
+		// After 100 concurrent calls, should be able to classify
+		result, err := classifier.Classify("/users/999/profile")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != "/users/{id}/profile" {
+			t.Errorf("Classify() = %v, want /users/{id}/profile", result)
+		}
+	})
+
+	t.Run("concurrent Learn and Classify", func(t *testing.T) {
+		classifier := NewClassifier(WithMinLearningCount(50))
+
+		var wg sync.WaitGroup
+
+		// Concurrent Learn calls
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func(batch int) {
+				defer wg.Done()
+				urls := make([]string, 5)
+				for j := 0; j < 5; j++ {
+					urls[j] = fmt.Sprintf("/users/%d/profile", batch*5+j)
+				}
+				classifier.Learn(urls)
+			}(i)
+		}
+
+		wg.Wait()
+
+		// Should have learned 50 URLs
+		result, err := classifier.Classify("/users/999/profile")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != "/users/{id}/profile" {
+			t.Errorf("Classify() = %v, want /users/{id}/profile", result)
+		}
+	})
+}
+

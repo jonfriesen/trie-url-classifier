@@ -33,3 +33,4 @@ go.work.sum
 
 # GoReleaser output
 dist/
+demo

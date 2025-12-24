@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	urlClassifier "github.com/ZoriHQ/trie-url-classifier"
+	urlClassifier "github.com/jonfriesen/trie-url-classifier"
 )
 
 func main() {
@@ -46,8 +46,12 @@ func main() {
 	fmt.Println("Classified URLs:")
 	fmt.Println("-----------------------------------")
 	for _, url := range testURLs {
-		pattern := classifier.Classify(url)
-		fmt.Printf("%-70s -> %s\n", url, pattern)
+		pattern, err := classifier.Classify(url)
+		if err != nil {
+			fmt.Printf("%-70s -> (learning: %v)\n", url, err)
+		} else {
+			fmt.Printf("%-70s -> %s\n", url, pattern)
+		}
 	}
 
 	fmt.Println()
@@ -74,10 +78,39 @@ func main() {
 		batchClassifier.Learn(batchData)
 
 		for _, url := range batchData {
-			pattern := batchClassifier.Classify(url)
-			fmt.Printf("  %s -> %s\n", url, pattern)
+			pattern, err := batchClassifier.Classify(url)
+			if err != nil {
+				fmt.Printf("  %s -> (learning: %v)\n", url, err)
+			} else {
+				fmt.Printf("  %s -> %s\n", url, pattern)
+			}
 		}
 
 		fmt.Println()
+	}
+
+	fmt.Println("=== Example: Live Learning Mode ===")
+	fmt.Println()
+
+	liveClassifier := urlClassifier.NewClassifier(
+		urlClassifier.WithMinLearningCount(5),
+	)
+
+	liveURLs := []string{
+		"/orders/12345/details",
+		"/orders/67890/details",
+		"/orders/11111/details",
+		"/orders/22222/details",
+		"/orders/33333/details",
+		"/orders/44444/details", // This one should classify
+	}
+
+	for _, url := range liveURLs {
+		pattern, err := liveClassifier.Classify(url)
+		if err != nil {
+			fmt.Printf("  %s -> learning (%v)\n", url, err)
+		} else {
+			fmt.Printf("  %s -> %s\n", url, pattern)
+		}
 	}
 }

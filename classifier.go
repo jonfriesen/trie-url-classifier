@@ -4,17 +4,24 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type Config struct {
 	CardinalityThreshold float64
 	MinSamples           int
+	MinLearningCount     int
+	MaxValuesPerNode     int  // Max unique values to track per node (0 = unlimited)
+	PruneHighCardinality bool // Collapse high-cardinality children to bound memory
 }
 
 func DefaultConfig() *Config {
 	return &Config{
 		CardinalityThreshold: 0.75,
 		MinSamples:           2,
+		MinLearningCount:     0,
+		MaxValuesPerNode:     0, // unlimited by default for backwards compatibility
+		PruneHighCardinality: false,
 	}
 }
 
@@ -32,9 +39,35 @@ func WithMinSamples(min int) Option {
 	}
 }
 
+func WithMinLearningCount(count int) Option {
+	return func(c *Config) {
+		c.MinLearningCount = count
+	}
+}
+
+// WithMaxValuesPerNode limits unique values tracked per trie node.
+// Once limit is reached, totalCount keeps incrementing but no new values are stored.
+// This bounds memory usage for long-running classifiers. Use 0 for unlimited.
+func WithMaxValuesPerNode(max int) Option {
+	return func(c *Config) {
+		c.MaxValuesPerNode = max
+	}
+}
+
+// WithPruneHighCardinality clears the values map once a node is confirmed
+// as high cardinality, saving additional memory. The node retains its
+// totalCount for cardinality estimation.
+func WithPruneHighCardinality(prune bool) Option {
+	return func(c *Config) {
+		c.PruneHighCardinality = prune
+	}
+}
+
 type Classifier struct {
-	root   *Segment
-	config *Config
+	root         *Segment
+	config       *Config
+	mu           sync.RWMutex
+	learnedCount int
 }
 
 func NewClassifier(opts ...Option) *Classifier {
@@ -50,8 +83,11 @@ func NewClassifier(opts ...Option) *Classifier {
 }
 
 func (c *Classifier) Learn(urls []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, url := range urls {
 		c.insert(url)
+		c.learnedCount++
 	}
 }
 
@@ -64,13 +100,38 @@ func (c *Classifier) insert(url string) {
 	node := c.root
 
 	for _, part := range parts {
-		if node.children[part] == nil {
-			node.children[part] = NewSegment(part)
+		var child *Segment
+
+		// If parent is collapsed, route through wildcard child
+		if node.collapsed {
+			if node.children["*"] == nil {
+				node.children["*"] = NewSegment("*")
+			}
+			child = node.children["*"]
+		} else {
+			if node.children[part] == nil {
+				node.children[part] = NewSegment(part)
+			}
+			child = node.children[part]
 		}
 
-		child := node.children[part]
-		child.values[part]++
 		child.totalCount++
+
+		// Only track value if below max limit (0 = unlimited)
+		if c.config.MaxValuesPerNode == 0 || len(child.values) < c.config.MaxValuesPerNode {
+			child.values[part]++
+		} else if _, exists := child.values[part]; exists {
+			child.values[part]++
+		}
+
+		// Check if we should collapse this node's children (memory optimization)
+		// Only collapse when children look like dynamic parameters (UUIDs, IDs, etc.)
+		// not when they're static path segments like "api", "users", etc.
+		if c.config.PruneHighCardinality && !node.collapsed &&
+			len(node.children) >= c.config.MaxValuesPerNode &&
+			c.hasHighVariability(node) && c.childrenLookDynamic(node) {
+			c.collapseChildren(node)
+		}
 
 		node = child
 	}
@@ -78,14 +139,83 @@ func (c *Classifier) insert(url string) {
 	node.isEnd = true
 }
 
-func (c *Classifier) Classify(url string) string {
-	if url == "" {
-		return ""
+// childrenLookDynamic checks if the majority of a node's children
+// appear to be dynamic values (UUIDs, IDs, etc.) rather than static paths
+func (c *Classifier) childrenLookDynamic(node *Segment) bool {
+	if len(node.children) == 0 {
+		return false
 	}
+
+	dynamicCount := 0
+	for childName := range node.children {
+		if c.looksLikeParameter(childName) {
+			dynamicCount++
+		}
+	}
+
+	// Require majority of children to look dynamic
+	return float64(dynamicCount)/float64(len(node.children)) >= 0.5
+}
+
+// collapseChildren merges all children into a single wildcard child
+func (c *Classifier) collapseChildren(node *Segment) {
+	if node.collapsed || len(node.children) == 0 {
+		return
+	}
+
+	// Create or get wildcard child
+	wildcard := NewSegment("*")
+	wildcard.pruned = true
+
+	// Merge all children's stats and grandchildren into wildcard
+	for _, child := range node.children {
+		wildcard.totalCount += child.totalCount
+		if child.isEnd {
+			wildcard.isEnd = true
+		}
+		// Merge grandchildren
+		for name, grandchild := range child.children {
+			if wildcard.children[name] == nil {
+				wildcard.children[name] = grandchild
+			} else {
+				// Merge stats
+				wildcard.children[name].totalCount += grandchild.totalCount
+				for v, cnt := range grandchild.values {
+					wildcard.children[name].values[v] += cnt
+				}
+			}
+		}
+	}
+
+	// Replace all children with single wildcard
+	node.children = map[string]*Segment{"*": wildcard}
+	node.collapsed = true
+}
+
+func (c *Classifier) Classify(url string) (string, error) {
+	if url == "" {
+		return "", nil
+	}
+
+	// Always learn during Classify (memory is bounded by PruneHighCardinality)
+	c.mu.Lock()
+	c.insert(url)
+	c.learnedCount++
+	count := c.learnedCount
+	belowMin := c.config.MinLearningCount > 0 && count <= c.config.MinLearningCount
+	c.mu.Unlock()
+
+	// Return error if still in learning phase
+	if belowMin {
+		return "", &InsufficientDataError{Count: count}
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
 	parts := c.splitURL(url)
 	if len(parts) == 0 {
-		return "/"
+		return "/", nil
 	}
 
 	normalized := make([]string, 0, len(parts))
@@ -93,6 +223,18 @@ func (c *Classifier) Classify(url string) string {
 
 	for i := 0; i < len(parts); i++ {
 		part := parts[i]
+
+		// Handle collapsed nodes - they are always high variability
+		if node.collapsed {
+			paramType := c.classifyParameterType(part)
+			normalized = append(normalized, "{"+paramType+"}")
+
+			// Use wildcard child to continue
+			if wildcardChild, exists := node.children["*"]; exists {
+				node = wildcardChild
+			}
+			continue
+		}
 
 		if child, exists := node.children[part]; exists {
 			if c.hasHighVariability(node) {
@@ -152,7 +294,7 @@ func (c *Classifier) Classify(url string) string {
 		break
 	}
 
-	return "/" + strings.Join(normalized, "/")
+	return "/" + strings.Join(normalized, "/"), nil
 }
 
 func (c *Classifier) shouldParameterize(segment *Segment) bool {
