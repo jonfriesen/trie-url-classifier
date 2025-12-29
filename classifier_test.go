@@ -543,4 +543,3 @@ func TestClassifier_ThreadSafety(t *testing.T) {
 		}
 	})
 }
-

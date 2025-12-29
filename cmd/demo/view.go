@@ -45,6 +45,9 @@ var (
 	arrowStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
 
+	timeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243"))
+
 	statusRunning = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("46")).
 			Bold(true)
@@ -102,7 +105,8 @@ func (m model) renderStatsCompact() string {
 			fmt.Sprintf("Depth: %s", valueStyle.Render(fmt.Sprintf("%d", m.stats.MaxDepth)))},
 		{fmt.Sprintf("Memory: %s", valueStyle.Render(formatBytes(m.stats.MemoryEstimate))),
 			fmt.Sprintf("Collapsed: %s", valueStyle.Render(formatNumber(m.stats.CollapsedNodes)))},
-		{fmt.Sprintf("Patterns: %s", valueStyle.Render(formatNumber(len(m.patternCounts)))), ""},
+		{fmt.Sprintf("Patterns: %s", valueStyle.Render(formatNumber(len(m.patternCounts)))),
+			fmt.Sprintf("Avg: %s", valueStyle.Render(formatDuration(m.avgLookupTime())))},
 	}
 
 	for _, row := range stats {
@@ -185,12 +189,26 @@ func (m model) renderRecentPairs() string {
 		if i >= 8 {
 			break
 		}
-		original := urlStyle.Render(truncate(pair.original, 35))
+		timeStr := timeStyle.Render(fmt.Sprintf("%7s", formatDuration(pair.lookupTime)))
+		original := urlStyle.Render(truncate(pair.original, 32))
 		pattern := highlightParams(pair.pattern)
-		sb.WriteString(fmt.Sprintf("%-38s%s%s\n", original, arrow, pattern))
+		sb.WriteString(fmt.Sprintf("%s %-35s%s%s\n", timeStr, original, arrow, pattern))
 	}
 
 	return sb.String()
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Microsecond {
+		return fmt.Sprintf("%dns", d.Nanoseconds())
+	}
+	if d < time.Millisecond {
+		return fmt.Sprintf("%dµs", d.Microseconds())
+	}
+	if d < time.Second {
+		return fmt.Sprintf("%.1fms", float64(d.Microseconds())/1000)
+	}
+	return fmt.Sprintf("%.2fs", d.Seconds())
 }
 
 func truncate(s string, max int) string {
