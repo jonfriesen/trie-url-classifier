@@ -7,6 +7,16 @@ import (
 	"sync"
 )
 
+var (
+	reUUID       = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	reDate       = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	reTimestamp  = regexp.MustCompile(`^\d{10,}$`)
+	reHash       = regexp.MustCompile(`^[0-9a-f]{24,}$`)
+	reStripeID   = regexp.MustCompile(`^(cus|sub|prod|price|pm|pi|ch|in|tok|src|ba|card)_[a-zA-Z0-9]+$`)
+	reSlugWithID = regexp.MustCompile(`^[a-z0-9]+-[a-z0-9-]+-\d+$`)
+	reSlug       = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*(-\d+)?$`)
+)
+
 type Config struct {
 	CardinalityThreshold float64
 	MinSamples           int
@@ -389,23 +399,23 @@ func (c *Classifier) mergeChildren(segments []*Segment) map[string]*Segment {
 }
 
 func (c *Classifier) looksLikeParameter(value string) bool {
-	if matched, _ := regexp.MatchString(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, value); matched {
+	if reUUID.MatchString(value) {
 		return true
 	}
 
-	if matched, _ := regexp.MatchString(`^\d{4}-\d{2}-\d{2}$`, value); matched {
+	if reDate.MatchString(value) {
 		return true
 	}
 
-	if matched, _ := regexp.MatchString(`^\d{10,}$`, value); matched {
+	if reTimestamp.MatchString(value) {
 		return true
 	}
 
-	if matched, _ := regexp.MatchString(`^[0-9a-f]{24,}$`, value); matched {
+	if reHash.MatchString(value) {
 		return true
 	}
 
-	if matched, _ := regexp.MatchString(`^(cus|sub|prod|price|pm|pi|ch|in|tok|src|ba|card)_[a-zA-Z0-9]+$`, value); matched {
+	if reStripeID.MatchString(value) {
 		return true
 	}
 
@@ -426,7 +436,7 @@ func (c *Classifier) looksLikeParameter(value string) bool {
 	// Must contain at least one hyphen AND either:
 	// - ends with digits
 	// - has multiple segments
-	if matched, _ := regexp.MatchString(`^[a-z0-9]+-[a-z0-9-]+-\d+$`, value); matched {
+	if reSlugWithID.MatchString(value) {
 		return true // Slug ending with numeric ID (e.g., "my-post-12345")
 	}
 
@@ -434,23 +444,23 @@ func (c *Classifier) looksLikeParameter(value string) bool {
 }
 
 func (c *Classifier) classifyParameterType(value string) string {
-	if matched, _ := regexp.MatchString(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, value); matched {
+	if reUUID.MatchString(value) {
 		return "uuid"
 	}
 
-	if matched, _ := regexp.MatchString(`^\d{4}-\d{2}-\d{2}$`, value); matched {
+	if reDate.MatchString(value) {
 		return "date"
 	}
 
-	if matched, _ := regexp.MatchString(`^\d{10,}$`, value); matched {
+	if reTimestamp.MatchString(value) {
 		return "timestamp"
 	}
 
-	if matched, _ := regexp.MatchString(`^[0-9a-f]{24,}$`, value); matched {
+	if reHash.MatchString(value) {
 		return "hash"
 	}
 
-	if matched, _ := regexp.MatchString(`^(cus|sub|prod|price|pm|pi|ch|in|tok|src|ba|card)_[a-zA-Z0-9]+$`, value); matched {
+	if reStripeID.MatchString(value) {
 		return "id"
 	}
 
@@ -463,7 +473,7 @@ func (c *Classifier) classifyParameterType(value string) string {
 		}
 	}
 
-	if matched, _ := regexp.MatchString(`^[a-z0-9]+(-[a-z0-9]+)*(-\d+)?$`, value); matched {
+	if reSlug.MatchString(value) {
 		return "slug"
 	}
 
